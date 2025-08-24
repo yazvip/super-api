@@ -572,6 +572,114 @@ function getAdvancedDashboardStats(): array
 }
 
 /**
+ * [BARU] Mengambil data komprehensif untuk halaman monitoring.
+ * @return array
+ */
+function getMonitoringData(): array
+{
+    $db = getDbConnection();
+    $data = [];
+
+    // 1. Informasi Sistem
+    // Menggunakan __DIR__ sebagai path dasar, mungkin perlu disesuaikan tergantung struktur server
+    $disk_path = '/'; // Path root untuk pengecekan disk, lebih umum
+    $disk_total = @disk_total_space($disk_path);
+    $disk_free = @disk_free_space($disk_path);
+
+    if ($disk_total !== false && $disk_free !== false) {
+        $disk_used = $disk_total - $disk_free;
+        $disk_usage_percentage = $disk_total > 0 ? round(($disk_used / $disk_total) * 100, 2) : 0;
+    } else {
+        $disk_used = 0;
+        $disk_usage_percentage = 0;
+    }
+
+    $data['system_info'] = [
+        'php_version' => phpversion(),
+        'web_server' => $_SERVER['SERVER_SOFTWARE'] ?? 'N/A',
+        'os' => php_uname('s'),
+        'disk_total' => $disk_total ?: 0,
+        'disk_used' => $disk_used,
+        'disk_usage_percentage' => $disk_usage_percentage,
+    ];
+
+    // 2. Informasi Database
+    try {
+        $dbName = DB_NAME;
+        $db_version_full = $db->query("SELECT VERSION()")->fetchColumn();
+        preg_match('/^[0-9]+\.[0-9]+\.[0-9]+/', $db_version_full, $matches);
+        $db_version = $matches[0] ?? $db_version_full;
+
+        $tables_stmt = $db->prepare("
+            SELECT
+                table_name as name,
+                table_rows as `rows`,
+                (data_length + index_length) as size_bytes
+            FROM information_schema.TABLES
+            WHERE table_schema = ?
+            ORDER BY size_bytes DESC
+        ");
+        $tables_stmt->execute([$dbName]);
+        $tables = $tables_stmt->fetchAll();
+        $total_size_bytes = array_sum(array_column($tables, 'size_bytes'));
+    } catch (PDOException $e) {
+        // Jika query ke information_schema gagal (misal karena permission)
+        $db_version = 'N/A';
+        $tables = [];
+        $total_size_bytes = 0;
+        error_log("Monitoring page - DB Info Error: " . $e->getMessage());
+    }
+
+    $data['database_info'] = [
+        'version' => $db_version,
+        'total_size_bytes' => $total_size_bytes,
+        'tables' => $tables
+    ];
+
+    // 3. Statistik API (30 hari terakhir)
+    $stats_stmt = $db->query("
+        SELECT
+            COUNT(id) as total_requests,
+            SUM(CASE WHEN status = 'Berhasil' THEN 1 ELSE 0 END) as successful_requests
+        FROM history
+        WHERE timestamp >= CURDATE() - INTERVAL 30 DAY
+    ");
+    $api_stats = $stats_stmt->fetch();
+    $total_requests = (int)($api_stats['total_requests'] ?? 0);
+    $successful_requests = (int)($api_stats['successful_requests'] ?? 0);
+    $failed_requests = $total_requests - $successful_requests;
+    $success_rate = $total_requests > 0 ? round(($successful_requests / $total_requests) * 100, 2) : 0;
+
+    $data['api_stats'] = [
+        'total_requests' => $total_requests,
+        'successful_requests' => $successful_requests,
+        'failed_requests' => $failed_requests,
+        'success_rate' => $success_rate,
+    ];
+
+    // 4. Data Grafik (30 hari terakhir) - Mirip dengan getAdvancedDashboardStats
+    $chart_data_stmt = $db->query("
+        SELECT DATE(timestamp) as date, COUNT(id) as hits
+        FROM history
+        WHERE timestamp >= CURDATE() - INTERVAL 30 DAY
+        GROUP BY DATE(timestamp)
+        ORDER BY date ASC
+    ");
+    $chart_data_raw = $chart_data_stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+
+    $labels = [];
+    $chart_values = [];
+    for ($i = 29; $i >= 0; $i--) {
+        $date = date('Y-m-d', strtotime("-$i days"));
+        $labels[] = date('d M', strtotime($date));
+        $chart_values[] = (int)($chart_data_raw[$date] ?? 0);
+    }
+    $data['chart_data'] = ['labels' => $labels, 'data' => $chart_values];
+
+    return $data;
+}
+
+/**
  * Mengirim respons JSON dan menghentikan skrip.
  * @param bool $success
  * @param string $message

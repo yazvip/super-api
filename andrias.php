@@ -142,6 +142,11 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
 
     try {
         switch ($action) {
+            case 'get_monitoring_data':
+                $monitoringData = getMonitoringData();
+                sendJsonResponse(true, 'Data monitoring berhasil diambil.', $monitoringData);
+                break;
+
             case 'get_key_details':
                 $id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
                 if (!$id) sendJsonResponse(false, 'ID tidak valid.', [], 400);
@@ -751,6 +756,10 @@ $csrf_token = generateCSRFToken();
             <a href="?page=dashboard" class="nav-item flex items-center gap-3 px-4 py-3 rounded-xl <?= $page === 'dashboard' ? 'active bg-gray-700/50 text-white' : 'hover:bg-gray-700/30 hover:text-white' ?>">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"></path></svg>
                 <span class="font-medium">Dashboard</span>
+            </a>
+            <a href="?page=monitoring" class="nav-item flex items-center gap-3 px-4 py-3 rounded-xl <?= $page === 'monitoring' ? 'active bg-gray-700/50 text-white' : 'hover:bg-gray-700/30 hover:text-white' ?>">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+                <span class="font-medium">Monitoring</span>
             </a>
             <a href="?page=api_keys" class="nav-item flex items-center gap-3 px-4 py-3 rounded-xl <?= in_array($page, ['api_keys', 'edit_key']) ? 'active bg-gray-700/50 text-white' : 'hover:bg-gray-700/30 hover:text-white' ?>">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H5v-2H3v-2H1v-4a6 6 0 016-6h4a6 6 0 016 6z"></path></svg>
