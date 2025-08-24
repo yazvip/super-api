@@ -9,14 +9,16 @@ initializeDatabase();
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'do_login') {
     $csrf_token = $_POST['csrf_token'] ?? '';
     $password = $_POST['password'] ?? '';
-    
+
     if (verifyCSRFToken($csrf_token) && verifyAdminPassword($password)) {
         $_SESSION['is_admin'] = true;
+        logAdminActivity('ADMIN_LOGIN_SUCCESS');
         // Regenerate session ID for security
         session_regenerate_id(true);
         header('Location: ' . $_SERVER['PHP_SELF'] . '?page=dashboard');
         exit;
     } else {
+        logAdminActivity('ADMIN_LOGIN_FAIL');
         $login_error = 'Kata sandi salah!';
     }
 }
@@ -69,7 +71,7 @@ if (!$is_logged_in) {
             <div class="absolute top-10 left-10 w-20 h-20 bg-white/10 rounded-full floating-animation"></div>
             <div class="absolute top-32 right-16 w-16 h-16 bg-white/10 rounded-full floating-animation" style="animation-delay: -2s;"></div>
             <div class="absolute bottom-20 left-20 w-12 h-12 bg-white/10 rounded-full floating-animation" style="animation-delay: -4s;"></div>
-            
+
             <div class="login-card p-8 rounded-3xl relative z-10">
                 <div class="flex flex-col items-center mb-8">
                     <div class="bg-gradient-to-r from-indigo-600 to-purple-600 p-4 rounded-2xl mb-4 shadow-lg">
@@ -78,7 +80,7 @@ if (!$is_logged_in) {
                     <h1 class="text-3xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">Admin Panel</h1>
                     <p class="text-slate-600 mt-2">Masuk untuk mengakses dashboard</p>
                 </div>
-                
+
                 <?php if (isset($login_error)): ?>
                 <div class="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded-r-lg mb-6">
                     <div class="flex items-center">
@@ -89,14 +91,14 @@ if (!$is_logged_in) {
                     </div>
                 </div>
                 <?php endif; ?>
-                
+
                 <form method="POST" class="space-y-6">
                     <input type="hidden" name="action" value="do_login">
                     <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
                     <div>
                         <label for="password" class="block text-sm font-semibold text-slate-700 mb-2">Kata Sandi</label>
                         <div class="relative">
-                            <input type="password" name="password" id="password" required 
+                            <input type="password" name="password" id="password" required
                                    class="block w-full px-4 py-3 bg-slate-50 border border-slate-300 rounded-xl shadow-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200"
                                    placeholder="Masukkan kata sandi admin">
                             <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
@@ -116,7 +118,7 @@ if (!$is_logged_in) {
                         </button>
                     </div>
                 </form>
-                
+
                 <div class="mt-8 pt-6 border-t border-slate-200">
                     <div class="text-center">
                         <p class="text-xs text-slate-500">
@@ -147,19 +149,51 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 sendJsonResponse(true, 'Data monitoring berhasil diambil.', $monitoringData);
                 break;
 
+            case 'clear_cache':
+                if (!verifyCSRFToken($input['csrf_token'] ?? '')) {
+                    sendJsonResponse(false, 'Token CSRF tidak valid.', [], 403);
+                }
+
+                $cache_dir = __DIR__ . '/cache';
+                $cleared_count = 0;
+                $errors = [];
+
+                if (is_dir($cache_dir)) {
+                    $files = scandir($cache_dir);
+                    if ($files) {
+                        foreach ($files as $file) {
+                            if ($file !== '.' && $file !== '..' && $file !== '.gitignore' && $file !== 'game_categories.json') {
+                                if (@unlink($cache_dir . '/' . $file)) {
+                                    $cleared_count++;
+                                } else {
+                                    $errors[] = "Gagal menghapus file: {$file}";
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (empty($errors)) {
+                    logAdminActivity('CACHE_CLEARED', "{$cleared_count} file dibersihkan.");
+                    sendJsonResponse(true, "Cache berhasil dibersihkan. {$cleared_count} file dihapus.");
+                } else {
+                    sendJsonResponse(false, "Gagal membersihkan sebagian cache.", ['errors' => $errors], 500);
+                }
+                break;
+
             case 'get_key_details':
                 $id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
                 if (!$id) sendJsonResponse(false, 'ID tidak valid.', [], 400);
-                
+
                 $stmt = $db->prepare("SELECT * FROM api_keys WHERE id = :id");
                 $stmt->execute([':id' => $id]);
                 $keyData = $stmt->fetch();
-                
+
                 if (!$keyData) sendJsonResponse(false, 'API Key tidak ditemukan.', [], 404);
-                
+
                 sendJsonResponse(true, 'Detail API Key berhasil diambil.', $keyData);
                 break;
-                
+
             case 'get_api_keys_list':
                 $stmt = $db->query("SELECT api_key, nama FROM api_keys ORDER BY created_at DESC");
                 sendJsonResponse(true, 'Daftar API Keys berhasil diambil.', $stmt->fetchAll());
@@ -170,20 +204,20 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 $api_key_filter = $_GET['api_key_filter'] ?? '';
                 $items_per_page = 20;
                 $offset = ($page - 1) * $items_per_page;
-                
+
                 $where_clause = '';
                 $params = [];
                 if (!empty($api_key_filter)) {
                     $where_clause = 'WHERE api_key = :api_key';
                     $params[':api_key'] = $api_key_filter;
                 }
-                
+
                 $count_stmt = $db->prepare("SELECT COUNT(id) FROM history $where_clause");
                 $count_stmt->execute($params);
                 $total_records = $count_stmt->fetchColumn();
-                
+
                 $total_pages = ceil($total_records / $items_per_page);
-                
+
                 $stmt = $db->prepare("SELECT * FROM history $where_clause ORDER BY timestamp DESC LIMIT :limit OFFSET :offset");
                 foreach ($params as $key => $value) {
                     $stmt->bindValue($key, $value);
@@ -194,17 +228,17 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 $history_data = $stmt->fetchAll();
                 sendJsonResponse(true, 'Data riwayat berhasil diambil.', ['history' => $history_data, 'pagination' => ['currentPage' => $page, 'totalPages' => $total_pages, 'totalRecords' => $total_records]]);
                 break;
-            
+
             // [BARU] Endpoint untuk statistik riwayat
             case 'get_history_stats':
                 $api_key_filter = $_GET['api_key_filter'] ?? '';
-                
+
                 $sql = "SELECT
                             COUNT(id) as total,
                             SUM(CASE WHEN status = 'Berhasil' THEN 1 ELSE 0 END) as success,
                             SUM(CASE WHEN status = 'Gagal' THEN 1 ELSE 0 END) as failed
                         FROM history";
-                
+
                 $params = [];
                 if (!empty($api_key_filter)) {
                     $sql .= " WHERE api_key = :api_key";
@@ -214,7 +248,7 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 $stmt = $db->prepare($sql);
                 $stmt->execute($params);
                 $stats = $stmt->fetch(PDO::FETCH_ASSOC);
-                
+
                 // Memastikan nilai adalah integer, bukan null jika tabel kosong
                 $stats['total'] = (int)($stats['total'] ?? 0);
                 $stats['success'] = (int)($stats['success'] ?? 0);
@@ -238,24 +272,24 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 if (!verifyCSRFToken($input['csrf_token'] ?? '')) {
                     sendJsonResponse(false, 'Token CSRF tidak valid.', [], 403);
                 }
-                
+
                 $api_key_filter = $input['api_key_filter'] ?? '';
                 $where_clause = '';
                 $params = [];
-                
+
                 if (!empty($api_key_filter)) {
                     $where_clause = 'WHERE api_key = :api_key';
                     $params[':api_key'] = $api_key_filter;
                 }
-                
+
                 $stmt = $db->prepare("DELETE FROM history $where_clause");
                 $stmt->execute($params);
                 $deleted_count = $stmt->rowCount();
-                
-                $message = $api_key_filter 
+
+                $message = $api_key_filter
                     ? "Berhasil menghapus {$deleted_count} riwayat untuk API Key yang dipilih."
                     : "Berhasil menghapus {$deleted_count} riwayat.";
-                    
+
                 sendJsonResponse(true, $message);
                 break;
 
@@ -302,7 +336,7 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 if (!in_array($backupType, ['full', 'database', 'files'])) {
                     sendJsonResponse(false, 'Tipe backup tidak valid.', [], 400);
                 }
-                
+
                 $result = createBackup($backupType);
                 if ($result['success']) {
                     sendJsonResponse(true, 'Backup berhasil dibuat.', $result);
@@ -320,13 +354,13 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 if (!verifyCSRFToken($input['csrf_token'] ?? '')) {
                     sendJsonResponse(false, 'Token CSRF tidak valid.', [], 403);
                 }
-                
+
                 $endpoint = $input['endpoint'] ?? '';
                 $method = strtoupper($input['method'] ?? 'GET');
                 $requestData = $input['request_data'] ?? '';
-                
+
                 $startTime = microtime(true);
-                
+
                 try {
                     $ch = curl_init();
                     curl_setopt_array($ch, [
@@ -336,36 +370,36 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                         CURLOPT_FOLLOWLOCATION => true,
                         CURLOPT_CUSTOMREQUEST => $method
                     ]);
-                    
+
                     if ($method === 'POST' && !empty($requestData)) {
                         curl_setopt($ch, CURLOPT_POSTFIELDS, $requestData);
                         curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
                     }
-                    
+
                     $response = curl_exec($ch);
                     $responseCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
                     $error = curl_error($ch);
                     curl_close($ch);
-                    
+
                     $responseTime = round((microtime(true) - $startTime) * 1000, 3);
-                    
+
                     $status = $error ? 'error' : 'success';
                     $responseData = $error ? $error : $response;
-                    
+
                     // Log the test
                     $logStmt = $db->prepare("
-                        INSERT INTO api_test_logs (endpoint, method, request_data, response_data, response_code, response_time, status) 
+                        INSERT INTO api_test_logs (endpoint, method, request_data, response_data, response_code, response_time, status)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     ");
                     $logStmt->execute([$endpoint, $method, $requestData, $responseData, $responseCode, $responseTime, $status]);
-                    
+
                     sendJsonResponse(true, 'Test API berhasil.', [
                         'response' => $responseData,
                         'response_code' => $responseCode,
                         'response_time' => $responseTime,
                         'status' => $status
                     ]);
-                    
+
                 } catch (Exception $e) {
                     sendJsonResponse(false, 'Error testing API: ' . $e->getMessage(), [], 500);
                 }
@@ -388,11 +422,11 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 $code = trim($input['code'] ?? '');
                 $name = trim($input['name'] ?? '');
                 $type = $input['type'] ?? 'bank';
-                
+
                 if (empty($code) || empty($name)) {
                     sendJsonResponse(false, 'Kode dan nama harus diisi.', [], 400);
                 }
-                
+
                 try {
                     $stmt = $db->prepare("INSERT INTO bank_codes (code, name, type) VALUES (?, ?, ?)");
                     $stmt->execute([$code, $name, $type]);
@@ -415,11 +449,11 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 $name = trim($input['name'] ?? '');
                 $type = $input['type'] ?? 'bank';
                 $isActive = $input['is_active'] ?? 1;
-                
+
                 if (!$id || empty($code) || empty($name)) {
                     sendJsonResponse(false, 'Data tidak lengkap.', [], 400);
                 }
-                
+
                 try {
                     $stmt = $db->prepare("UPDATE bank_codes SET code = ?, name = ?, type = ?, is_active = ? WHERE id = ?");
                     $stmt->execute([$code, $name, $type, $isActive, $id]);
@@ -437,7 +471,7 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 if (!$id) {
                     sendJsonResponse(false, 'ID tidak valid.', [], 400);
                 }
-                
+
                 $stmt = $db->prepare("DELETE FROM bank_codes WHERE id = ?");
                 $stmt->execute([$id]);
                 sendJsonResponse(true, 'Bank code berhasil dihapus.');
@@ -447,21 +481,21 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 $page = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT, ['options' => ['default' => 1, 'min_range' => 1]]);
                 $limit = 20;
                 $offset = ($page - 1) * $limit;
-                
+
                 $countStmt = $db->query("SELECT COUNT(*) FROM api_security_logs");
                 $totalRecords = $countStmt->fetchColumn();
                 $totalPages = ceil($totalRecords / $limit);
-                
+
                 $stmt = $db->prepare("
-                    SELECT asl.*, ak.nama 
-                    FROM api_security_logs asl 
-                    LEFT JOIN api_keys ak ON asl.api_key = ak.api_key 
-                    ORDER BY asl.last_request DESC 
+                    SELECT asl.*, ak.nama
+                    FROM api_security_logs asl
+                    LEFT JOIN api_keys ak ON asl.api_key = ak.api_key
+                    ORDER BY asl.last_request DESC
                     LIMIT ? OFFSET ?
                 ");
                 $stmt->execute([$limit, $offset]);
                 $logs = $stmt->fetchAll();
-                
+
                 sendJsonResponse(true, 'Security logs berhasil diambil.', [
                     'logs' => $logs,
                     'pagination' => [
@@ -479,20 +513,20 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 $apiKey = $input['api_key'] ?? '';
                 $ipAddress = $input['ip_address'] ?? '';
                 $blockHours = (int)($input['block_hours'] ?? 24);
-                
+
                 if (empty($apiKey) || empty($ipAddress)) {
                     sendJsonResponse(false, 'Data tidak lengkap.', [], 400);
                 }
-                
+
                 $blockedUntil = date('Y-m-d H:i:s', strtotime("+{$blockHours} hours"));
-                
+
                 $stmt = $db->prepare("
-                    UPDATE api_security_logs 
-                    SET is_blocked = 1, blocked_until = ? 
+                    UPDATE api_security_logs
+                    SET is_blocked = 1, blocked_until = ?
                     WHERE api_key = ? AND ip_address = ?
                 ");
                 $stmt->execute([$blockedUntil, $apiKey, $ipAddress]);
-                
+
                 sendJsonResponse(true, "API key berhasil diblokir selama {$blockHours} jam.");
                 break;
 
@@ -502,18 +536,18 @@ if (isset($_GET['api']) && $_GET['api'] === 'true') {
                 }
                 $apiKey = $input['api_key'] ?? '';
                 $ipAddress = $input['ip_address'] ?? '';
-                
+
                 if (empty($apiKey) || empty($ipAddress)) {
                     sendJsonResponse(false, 'Data tidak lengkap.', [], 400);
                 }
-                
+
                 $stmt = $db->prepare("
-                    UPDATE api_security_logs 
-                    SET is_blocked = 0, blocked_until = NULL 
+                    UPDATE api_security_logs
+                    SET is_blocked = 0, blocked_until = NULL
                     WHERE api_key = ? AND ip_address = ?
                 ");
                 $stmt->execute([$apiKey, $ipAddress]);
-                
+
                 sendJsonResponse(true, 'API key berhasil di-unblock.');
                 break;
 
@@ -534,41 +568,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         $post_action = $_POST['action'] ?? '';
         $csrf_token = $_POST['csrf_token'] ?? '';
-        
+
         // Verify CSRF token for all admin actions
         if (!verifyCSRFToken($csrf_token)) {
             header('Location: ?page=dashboard&error=csrf_invalid');
             exit;
         }
-        
+
         switch ($post_action) {
             case 'change_admin_password':
                 $current_password = $_POST['current_password'] ?? '';
                 $new_password = $_POST['new_password'] ?? '';
                 $confirm_password = $_POST['confirm_password'] ?? '';
-                
+
                 if (!verifyAdminPassword($current_password)) {
                     header('Location: ?page=settings&error=current_password_wrong');
                     exit;
                 }
-                
+
                 if ($new_password !== $confirm_password) {
                     header('Location: ?page=settings&error=password_mismatch');
                     exit;
                 }
-                
+
                 if (strlen($new_password) < 6) {
                     header('Location: ?page=settings&error=password_too_short');
                     exit;
                 }
-                
+
                 if (updateAdminPassword($new_password)) {
+                    logAdminActivity('ADMIN_PASSWORD_CHANGE');
                     header('Location: ?page=settings&status=password_changed');
                 } else {
                     header('Location: ?page=settings&error=password_change_failed');
                 }
                 exit;
-            
+
             // [BARU] Menangani pembaruan pengaturan keamanan
             case 'update_security_settings':
                 $rate_limit = filter_input(INPUT_POST, 'rate_limit_count', FILTER_VALIDATE_INT, ['options' => ['default' => 60, 'min_range' => 1]]);
@@ -579,17 +614,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 updateSetting('auto_block_duration', (string)$block_duration);
                 updateSetting('auto_block_enabled', $auto_block_enabled);
 
+                logAdminActivity('SETTINGS_UPDATE_SECURITY');
                 header('Location: ?page=security&status=security_settings_updated');
                 exit;
 
             case 'update_api_settings':
                 $delay = filter_input(INPUT_POST, 'api_request_delay', FILTER_VALIDATE_INT);
-                
+
                 if ($delay === false || $delay < 0) {
                     $delay = 0; // Default ke 0 jika input tidak valid
                 }
 
                 if (updateSetting('api_request_delay', (string)$delay)) {
+                    logAdminActivity('SETTINGS_UPDATE_API', "Set request delay to {$delay}");
                     header('Location: ?page=settings&status=api_settings_updated');
                 } else {
                     header('Location: ?page=settings&error=api_settings_failed');
@@ -608,6 +645,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 $stmt = $db->prepare("UPDATE api_keys SET nama = :nama, nomor_wa = :nomor_wa, monthly_limit = :limit, expiry_date = :expiry, is_active = :active WHERE id = :id");
                 $stmt->execute([':nama' => $nama, ':nomor_wa' => $nomor_wa, ':limit' => $limit, ':expiry' => $expiry, ':active' => $is_active, ':id' => $id]);
+                logAdminActivity('API_KEY_UPDATE', "ID: {$id}, Nama: {$nama}");
                 header('Location: ?page=api_keys&status=key_updated'); exit;
 
             case 'add_key':
@@ -616,14 +654,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $nomor_wa = trim($_POST['nomor_wa']);
                 $limit = filter_input(INPUT_POST, 'monthly_limit', FILTER_VALIDATE_INT, ['options' => ['default' => 100]]);
                 $expiry = !empty($_POST['expiry_date']) ? $_POST['expiry_date'] : null;
-                
+
                 $stmt = $db->prepare("INSERT INTO api_keys (api_key, nama, nomor_wa, monthly_limit, expiry_date, created_at) VALUES (:api_key, :nama, :nomor_wa, :limit, :expiry, NOW())");
                 $stmt->execute([':api_key' => $new_key, ':nama' => $nama, ':nomor_wa' => $nomor_wa, ':limit' => $limit, ':expiry' => $expiry]);
-                
-                $new_key_id = $db->lastInsertId();
 
-                header('Location: ?page=api_keys&new_key_id=' . $new_key_id); 
-                exit; 
+                $new_key_id = $db->lastInsertId();
+                logAdminActivity('API_KEY_CREATE', "Key: {$new_key}, Nama: {$nama}");
+
+                header('Location: ?page=api_keys&new_key_id=' . $new_key_id);
+                exit;
 
             case 'delete_key':
                 $id = filter_input(INPUT_POST, 'id', FILTER_VALIDATE_INT);
@@ -637,6 +676,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $db->prepare("DELETE FROM history WHERE api_key = :api_key")->execute([':api_key' => $apiKey]);
                         $db->prepare("DELETE FROM api_keys WHERE id = :id")->execute([':id' => $id]);
                         $db->commit();
+                        logAdminActivity('API_KEY_DELETE', "Key: {$apiKey}");
                         header('Location: ?page=api_keys&status=key_deleted');
                     } else {
                         $db->rollBack();
@@ -654,7 +694,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     header('Location: ?page=api_keys&status=usage_reset');
                 }
                 exit;
-            
+
             case 'do_update_notification':
                 $id = filter_input(INPUT_POST, 'id', FILTER_VALIDATE_INT);
                 $message = trim($_POST['message'] ?? '');
@@ -689,8 +729,8 @@ $csrf_token = generateCSRFToken();
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        body { 
-            font-family: 'Inter', sans-serif; 
+        body {
+            font-family: 'Inter', sans-serif;
             background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
             min-height: 100vh;
         }
@@ -699,7 +739,7 @@ $csrf_token = generateCSRFToken();
         ::-webkit-scrollbar-thumb { background: #a7b5c9; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
         #notification { position: fixed; top: 1.5rem; right: 1.5rem; z-index: 50; }
-        .sidebar { 
+        .sidebar {
             transition: transform 0.3s ease-in-out;
             background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
             box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
@@ -813,7 +853,7 @@ $csrf_token = generateCSRFToken();
             </button>
             <h1 class="text-lg font-bold text-slate-800">Admin Panel</h1>
         </header>
-        
+
         <main class="flex-1 p-6 md:p-8 main-content">
             <div id="notification"></div>
             <?php
@@ -915,24 +955,24 @@ document.addEventListener('DOMContentLoaded', function() {
         const warning = document.getElementById('confirm-warning');
         const yesBtn = document.getElementById('confirm-yes');
         const noBtn = document.getElementById('confirm-no');
-        
+
         // Set content
         title.textContent = options.title || 'Konfirmasi';
         subtitle.textContent = options.subtitle || '';
         message.textContent = options.message || '';
         yesBtn.textContent = options.confirmText || 'Ya';
-        
+
         // Set icon and colors
         const iconClass = options.type === 'danger' ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600';
         const btnClass = options.type === 'danger' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700';
-        
+
         icon.className = `w-12 h-12 rounded-full flex items-center justify-center ${iconClass}`;
-        icon.innerHTML = options.type === 'danger' ? 
+        icon.innerHTML = options.type === 'danger' ?
             '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z"></path></svg>' :
             '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
-        
+
         yesBtn.className = `flex-1 px-4 py-2 text-white rounded-lg font-semibold ${btnClass}`;
-        
+
         // Show/hide warning
         if (options.warning) {
             warning.querySelector('p').textContent = options.warning;
@@ -940,18 +980,18 @@ document.addEventListener('DOMContentLoaded', function() {
         } else {
             warning.classList.add('hidden');
         }
-        
+
         // Set up event handlers
         yesBtn.onclick = () => {
             modal.classList.add('hidden');
             if (options.onConfirm) options.onConfirm();
         };
-        
+
         noBtn.onclick = () => {
             modal.classList.add('hidden');
             if (options.onCancel) options.onCancel();
         };
-        
+
         modal.classList.remove('hidden');
     };
 
@@ -959,10 +999,10 @@ document.addEventListener('DOMContentLoaded', function() {
         const notifContainer = document.getElementById('notification');
         const notifId = 'notif-' + Date.now();
         const bgColor = type === 'success' ? 'bg-gradient-to-r from-green-500 to-green-600' : 'bg-gradient-to-r from-red-500 to-red-600';
-        const icon = type === 'success' 
+        const icon = type === 'success'
             ? `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`
             : `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`;
-        
+
         const notifElement = document.createElement('div');
         notifElement.id = notifId;
         notifElement.className = `flex items-center gap-3 w-full max-w-sm p-4 text-white ${bgColor} rounded-xl shadow-2xl transition-all duration-300 transform translate-x-full opacity-0`;
@@ -977,7 +1017,7 @@ document.addEventListener('DOMContentLoaded', function() {
             notifElement.addEventListener('transitionend', () => notifElement.remove());
         }, 4000);
     };
-    
+
     async function apiCall(action, options = {}) {
         try {
             const response = await fetch(`?api=true&action=${action}`, options);
@@ -1019,7 +1059,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 historyTbody.innerHTML = `<tr><td colspan="8" class="text-center p-6 text-slate-500">Tidak ada data riwayat.</td></tr>`; return;
             }
             historyTbody.innerHTML = data.map(row => {
-                const statusBadge = row.status === 'Berhasil' 
+                const statusBadge = row.status === 'Berhasil'
                     ? `<span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800">Berhasil</span>`
                     : `<span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800">Gagal</span>`;
                 const formattedDate = new Date(row.timestamp).toLocaleString('id-ID');
@@ -1050,18 +1090,18 @@ document.addEventListener('DOMContentLoaded', function() {
             paginationHTML += `<button class="px-3 py-1 border border-slate-300 rounded-md bg-white hover:bg-slate-50 text-sm pagination-btn" data-page="${currentPage + 1}" ${currentPage === totalPages ? 'disabled' : ''}>&raquo;</button></div>`;
             paginationControls.innerHTML = paginationHTML;
         }
-        
+
         document.body.addEventListener('click', async function(e) {
             if (e.target.matches('.delete-item-btn')) {
                 if (!confirm('Anda yakin ingin menghapus riwayat ini?')) return;
                 try {
                     const result = await apiCall('delete_history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: e.target.dataset.id, csrf_token: '<?= $csrf_token ?>' }) });
-                    window.showNotification(result.message); 
+                    window.showNotification(result.message);
                     window.fetchHistory(currentPage);
                 } catch (error) {}
             }
             if (e.target.matches('.pagination-btn:not(:disabled)')) {
-                window.fetchHistory(parseInt(e.target.dataset.page)); 
+                window.fetchHistory(parseInt(e.target.dataset.page));
             }
         });
 
@@ -1118,7 +1158,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 } catch (error) {}
             }
         });
-        
+
         deleteAllBtn.addEventListener('click', async () => {
              if (!confirm('PERHATIAN! Anda yakin ingin menghapus SEMUA notifikasi?')) return;
              try {
@@ -1129,20 +1169,20 @@ document.addEventListener('DOMContentLoaded', function() {
 
         fetchNotifications();
     }
-    
+
     // JS untuk modal tambah API Key
     if (page === 'api_keys') {
         const addKeyBtn = document.getElementById('add-key-btn');
         const addKeyModal = document.getElementById('add-key-modal');
         const closeBtn1 = document.getElementById('close-modal-btn');
         const closeBtn2 = document.getElementById('close-modal-btn-2');
-        
+
         if (addKeyBtn) {
             addKeyBtn.addEventListener('click', () => {
                 addKeyModal.classList.remove('hidden');
             });
         }
-        
+
         const closeModal = () => {
             addKeyModal.classList.add('hidden');
         };

@@ -8,6 +8,7 @@ const DB_NAME = 'andn3765_api';
 const DB_USER = 'andn3765_api';
 const DB_PASS = 'andn3765_api';
 const DB_CHARSET = 'utf8mb4';
+const ERROR_LOG_PATH = __DIR__ . '/../error.log'; // Path to the PHP error log. Sesuaikan jika perlu.
 
 /**
  * Get admin password from database
@@ -37,7 +38,7 @@ function updateAdminPassword(string $newPassword): bool
     try {
         $hashedPassword = password_hash($newPassword, PASSWORD_DEFAULT);
         $stmt = $db->prepare("
-            INSERT INTO admin_settings (setting_key, setting_value) 
+            INSERT INTO admin_settings (setting_key, setting_value)
             VALUES ('admin_password', :password)
             ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
         ");
@@ -80,7 +81,7 @@ function updateSetting(string $key, string $value): bool
     $db = getDbConnection();
     try {
         $stmt = $db->prepare("
-            INSERT INTO admin_settings (setting_key, setting_value) 
+            INSERT INTO admin_settings (setting_key, setting_value)
             VALUES (:key, :value)
             ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
         ");
@@ -174,6 +175,7 @@ function initializeDatabase(): void
         $db->exec("CREATE TABLE IF NOT EXISTS `api_security_logs` (`id` INT AUTO_INCREMENT PRIMARY KEY, `api_key` VARCHAR(255) NOT NULL, `ip_address` VARCHAR(45) NOT NULL, `request_count` INT NOT NULL DEFAULT 1, `last_request` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, `is_blocked` TINYINT(1) NOT NULL DEFAULT 0, `blocked_until` DATETIME NULL, `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY `unique_key_ip` (`api_key`,`ip_address`), INDEX `idx_last_request` (`last_request`)) ENGINE=InnoDB DEFAULT CHARSET=" . DB_CHARSET);
         $db->exec("CREATE TABLE IF NOT EXISTS `api_test_logs` (`id` INT AUTO_INCREMENT PRIMARY KEY, `endpoint` VARCHAR(255) NOT NULL, `method` VARCHAR(10) NOT NULL, `request_data` TEXT, `response_data` TEXT, `response_code` INT, `response_time` DECIMAL(10,3), `status` ENUM('success', 'error') NOT NULL, `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=" . DB_CHARSET);
         $db->exec("CREATE TABLE IF NOT EXISTS `backup_logs` (`id` INT AUTO_INCREMENT PRIMARY KEY, `backup_type` ENUM('full', 'database', 'files') NOT NULL, `filename` VARCHAR(255) NOT NULL, `file_size` BIGINT, `status` ENUM('success', 'failed', 'in_progress') NOT NULL, `error_message` TEXT, `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=" . DB_CHARSET);
+        $db->exec("CREATE TABLE IF NOT EXISTS `admin_activity_logs` (`id` INT AUTO_INCREMENT PRIMARY KEY, `admin_user` VARCHAR(100) NOT NULL, `action` VARCHAR(100) NOT NULL, `details` TEXT, `ip_address` VARCHAR(45) NOT NULL, `timestamp` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, INDEX `idx_action` (`action`), INDEX `idx_timestamp` (`timestamp`)) ENGINE=InnoDB DEFAULT CHARSET=" . DB_CHARSET);
 
         // Cek dan tambahkan kolom baru ke tabel api_keys jika belum ada
         $stmt = $db->query("SHOW COLUMNS FROM `api_keys` LIKE 'nama'");
@@ -221,15 +223,43 @@ function logSecurityEvent(string $apiKey, string $ipAddress): void
     $db = getDbConnection();
     try {
         $stmt = $db->prepare("
-            INSERT INTO api_security_logs (api_key, ip_address, request_count, last_request) 
+            INSERT INTO api_security_logs (api_key, ip_address, request_count, last_request)
             VALUES (:api_key, :ip, 1, NOW())
-            ON DUPLICATE KEY UPDATE 
-            request_count = request_count + 1, 
+            ON DUPLICATE KEY UPDATE
+            request_count = request_count + 1,
             last_request = NOW()
         ");
         $stmt->execute([':api_key' => $apiKey, ':ip' => $ipAddress]);
     } catch (PDOException $e) {
         error_log("Error logging security event: " . $e->getMessage());
+    }
+}
+
+/**
+ * [BARU] Mencatat aktivitas admin ke database.
+ * @param string $action Aksi yang dilakukan (misal: 'LOGIN', 'CREATE_KEY').
+ * @param string $details Detail tambahan mengenai aksi tersebut.
+ */
+function logAdminActivity(string $action, string $details = ''): void
+{
+    try {
+        $db = getDbConnection();
+        $ip_address = $_SERVER['REMOTE_ADDR'] ?? 'UNKNOWN';
+
+        $stmt = $db->prepare(
+            "INSERT INTO admin_activity_logs (admin_user, action, details, ip_address)
+             VALUES (:user, :action, :details, :ip)"
+        );
+
+        $stmt->execute([
+            ':user' => 'admin', // Hardcoded for now
+            ':action' => $action,
+            ':details' => $details,
+            ':ip' => $ip_address
+        ]);
+    } catch (PDOException $e) {
+        // Gagal mencatat tidak boleh menghentikan aplikasi
+        error_log("Gagal mencatat aktivitas admin: " . $e->getMessage());
     }
 }
 
@@ -244,29 +274,29 @@ function isApiKeyBlocked(string $apiKey, string $ipAddress): bool
     $db = getDbConnection();
     try {
         $stmt = $db->prepare("
-            SELECT is_blocked, blocked_until 
-            FROM api_security_logs 
+            SELECT is_blocked, blocked_until
+            FROM api_security_logs
             WHERE api_key = :api_key AND ip_address = :ip
         ");
         $stmt->execute([':api_key' => $apiKey, ':ip' => $ipAddress]);
         $result = $stmt->fetch();
-        
+
         if (!$result || !$result['is_blocked']) {
             return false;
         }
-        
+
         // Check if block period has expired
         if ($result['blocked_until'] && $result['blocked_until'] < date('Y-m-d H:i:s')) {
             // Unblock the API key
             $unblockStmt = $db->prepare("
-                UPDATE api_security_logs 
-                SET is_blocked = 0, blocked_until = NULL 
+                UPDATE api_security_logs
+                SET is_blocked = 0, blocked_until = NULL
                 WHERE api_key = :api_key AND ip_address = :ip
             ");
             $unblockStmt->execute([':api_key' => $apiKey, ':ip' => $ipAddress]);
             return false;
         }
-        
+
         return true;
     } catch (PDOException $e) {
         error_log("Error checking API block status: " . $e->getMessage());
@@ -283,18 +313,18 @@ function createBackup(string $type): array
 {
     $db = getDbConnection();
     $backupDir = __DIR__ . '/backups';
-    
+
     if (!is_dir($backupDir)) {
         if (!mkdir($backupDir, 0755, true)) {
              return ['success' => false, 'error' => 'Gagal membuat direktori backup.'];
         }
     }
-    
+
     $timestamp = date('Y-m-d_H-i-s');
-    
+
     try {
         $result = ['success' => false, 'error' => 'Tipe backup tidak valid'];
-        
+
         if ($type === 'database' || $type === 'full') {
             $filename = "backup_database_{$timestamp}";
             $logId = logBackupStatus($db, 'database', $filename, 'in_progress');
@@ -317,9 +347,9 @@ function createBackup(string $type): array
             // Jika full, kita kembalikan pesan sukses umum
             return ['success' => true, 'message' => 'Backup database dan file berhasil.'];
         }
-        
+
         return $result;
-        
+
     } catch (Exception $e) {
         error_log("Backup error: " . $e->getMessage());
         return ['success' => false, 'error' => $e->getMessage()];
@@ -371,13 +401,13 @@ function createDatabaseBackup(string $backupDir, string $filename): array
         foreach ($tables as $table) {
             fwrite($handle, "--\n-- Struktur tabel `{$table}`\n--\n\n");
             fwrite($handle, "DROP TABLE IF EXISTS `{$table}`;\n");
-            
+
             $createTableStmt = $db->query("SHOW CREATE TABLE `{$table}`")->fetch(PDO::FETCH_ASSOC);
             fwrite($handle, $createTableStmt['Create Table'] . ";\n\n");
-            
+
             $dataStmt = $db->query("SELECT * FROM `{$table}`");
             $numFields = $dataStmt->columnCount();
-            
+
             if ($dataStmt->rowCount() > 0) {
                 fwrite($handle, "--\n-- Dumping data untuk tabel `{$table}`\n--\n\n");
                 fwrite($handle, "LOCK TABLES `{$table}` WRITE;\n");
@@ -406,7 +436,7 @@ function createDatabaseBackup(string $backupDir, string $filename): array
                 fwrite($handle, "UNLOCK TABLES;\n\n");
             }
         }
-        
+
         fwrite($handle, "SET FOREIGN_KEY_CHECKS=1;\n");
         fclose($handle);
 
@@ -432,7 +462,7 @@ function createFilesBackup(string $backupDir, string $filename): array
 {
     $zipFile = $backupDir . '/' . $filename . '.zip';
     $projectDir = dirname(__DIR__); // Get the parent directory of admin_functions.php
-    
+
     // Periksa apakah kelas ZipArchive ada
     if (!class_exists('ZipArchive')) {
         return ['success' => false, 'error' => 'Kelas ZipArchive tidak ditemukan. Ekstensi PHP Zip diperlukan.'];
@@ -442,30 +472,30 @@ function createFilesBackup(string $backupDir, string $filename): array
     if ($zip->open($zipFile, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== TRUE) {
         return ['success' => false, 'error' => 'Tidak dapat membuat file zip'];
     }
-    
+
     $files = new RecursiveIteratorIterator(
         new RecursiveDirectoryIterator($projectDir, RecursiveDirectoryIterator::SKIP_DOTS),
         RecursiveIteratorIterator::LEAVES_ONLY
     );
-    
+
     foreach ($files as $name => $file) {
         if (!$file->isDir()) {
             $filePath = $file->getRealPath();
             $relativePath = substr($filePath, strlen($projectDir) + 1);
-            
+
             // Skip backup directory and other unnecessary files
-            if (strpos($filePath, $backupDir) === 0 || 
+            if (strpos($filePath, $backupDir) === 0 ||
                 strpos($relativePath, '.git') === 0 ||
                 strpos($relativePath, 'node_modules') === 0) {
                 continue;
             }
-            
+
             $zip->addFile($filePath, $relativePath);
         }
     }
-    
+
     $zip->close();
-    
+
     if (file_exists($zipFile) && filesize($zipFile) > 0) {
         return [
             'success' => true,
@@ -572,7 +602,7 @@ function getAdvancedDashboardStats(): array
 }
 
 /**
- * [BARU] Mengambil data komprehensif untuk halaman monitoring.
+ * [DIROMBAK] Mengambil data komprehensif untuk halaman monitoring.
  * @return array
  */
 function getMonitoringData(): array
@@ -580,20 +610,12 @@ function getMonitoringData(): array
     $db = getDbConnection();
     $data = [];
 
-    // 1. Informasi Sistem
-    // Menggunakan __DIR__ sebagai path dasar, mungkin perlu disesuaikan tergantung struktur server
-    $disk_path = '/'; // Path root untuk pengecekan disk, lebih umum
+    // --- 1. Informasi Sistem ---
+    $disk_path = '/';
     $disk_total = @disk_total_space($disk_path);
     $disk_free = @disk_free_space($disk_path);
-
-    if ($disk_total !== false && $disk_free !== false) {
-        $disk_used = $disk_total - $disk_free;
-        $disk_usage_percentage = $disk_total > 0 ? round(($disk_used / $disk_total) * 100, 2) : 0;
-    } else {
-        $disk_used = 0;
-        $disk_usage_percentage = 0;
-    }
-
+    $disk_used = ($disk_total !== false && $disk_free !== false) ? $disk_total - $disk_free : 0;
+    $disk_usage_percentage = ($disk_total > 0) ? round(($disk_used / $disk_total) * 100, 2) : 0;
     $data['system_info'] = [
         'php_version' => phpversion(),
         'web_server' => $_SERVER['SERVER_SOFTWARE'] ?? 'N/A',
@@ -603,70 +625,92 @@ function getMonitoringData(): array
         'disk_usage_percentage' => $disk_usage_percentage,
     ];
 
-    // 2. Informasi Database
+    // --- 2. Live Error Log ---
+    $log_content = 'File log tidak ditemukan atau tidak dapat dibaca di: ' . ERROR_LOG_PATH;
+    if (defined('ERROR_LOG_PATH') && file_exists(ERROR_LOG_PATH) && is_readable(ERROR_LOG_PATH)) {
+        $lines = file(ERROR_LOG_PATH, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines) {
+            $log_content = implode("\n", array_slice($lines, -20));
+        } else {
+            $log_content = 'File log kosong.';
+        }
+    }
+    $data['error_log'] = ['content' => $log_content];
+
+    // --- 3. Informasi Database ---
     try {
         $dbName = DB_NAME;
         $db_version_full = $db->query("SELECT VERSION()")->fetchColumn();
         preg_match('/^[0-9]+\.[0-9]+\.[0-9]+/', $db_version_full, $matches);
         $db_version = $matches[0] ?? $db_version_full;
-
-        $tables_stmt = $db->prepare("
-            SELECT
-                table_name as name,
-                table_rows as `rows`,
-                (data_length + index_length) as size_bytes
-            FROM information_schema.TABLES
-            WHERE table_schema = ?
-            ORDER BY size_bytes DESC
-        ");
+        $tables_stmt = $db->prepare("SELECT table_name as name, table_rows as `rows`, (data_length + index_length) as size_bytes FROM information_schema.TABLES WHERE table_schema = ? ORDER BY size_bytes DESC");
         $tables_stmt->execute([$dbName]);
         $tables = $tables_stmt->fetchAll();
         $total_size_bytes = array_sum(array_column($tables, 'size_bytes'));
     } catch (PDOException $e) {
-        // Jika query ke information_schema gagal (misal karena permission)
         $db_version = 'N/A';
         $tables = [];
         $total_size_bytes = 0;
         error_log("Monitoring page - DB Info Error: " . $e->getMessage());
     }
+    $data['database_info'] = ['version' => $db_version, 'total_size_bytes' => $total_size_bytes, 'tables' => $tables];
 
-    $data['database_info'] = [
-        'version' => $db_version,
-        'total_size_bytes' => $total_size_bytes,
-        'tables' => $tables
-    ];
+    // --- 4. Slow Query Log ---
+    try {
+        $slow_log_stmt = $db->query("SELECT start_time, user_host, query_time, lock_time, rows_sent, rows_examined, sql_text FROM mysql.slow_log ORDER BY start_time DESC LIMIT 10");
+        $data['slow_query_log'] = $slow_log_stmt->fetchAll();
+    } catch (PDOException $e) {
+        $data['slow_query_log'] = [['error' => 'Tidak dapat mengakses log kueri lambat. Periksa hak akses database.']];
+        error_log("Monitoring page - Slow Query Log Error: " . $e->getMessage());
+    }
 
-    // 3. Statistik API (30 hari terakhir)
-    $stats_stmt = $db->query("
-        SELECT
-            COUNT(id) as total_requests,
-            SUM(CASE WHEN status = 'Berhasil' THEN 1 ELSE 0 END) as successful_requests
-        FROM history
-        WHERE timestamp >= CURDATE() - INTERVAL 30 DAY
-    ");
-    $api_stats = $stats_stmt->fetch();
-    $total_requests = (int)($api_stats['total_requests'] ?? 0);
-    $successful_requests = (int)($api_stats['successful_requests'] ?? 0);
-    $failed_requests = $total_requests - $successful_requests;
-    $success_rate = $total_requests > 0 ? round(($successful_requests / $total_requests) * 100, 2) : 0;
+    // --- 5. Statistik & Analitik API ---
+    $top_consumers_stmt = $db->query("SELECT a.nama, COUNT(h.id) as total_hits FROM history h JOIN api_keys a ON h.api_key = a.api_key WHERE h.timestamp >= CURDATE() - INTERVAL 1 DAY GROUP BY h.api_key, a.nama ORDER BY total_hits DESC LIMIT 5");
+    $data['api_analytics']['top_consumers_today'] = $top_consumers_stmt->fetchAll();
 
-    $data['api_stats'] = [
-        'total_requests' => $total_requests,
-        'successful_requests' => $successful_requests,
-        'failed_requests' => $failed_requests,
-        'success_rate' => $success_rate,
-    ];
+    $keys_nearing_limit = [];
+    $active_keys_stmt = $db->query("SELECT api_key, nama, monthly_limit FROM api_keys WHERE is_active = 1 AND monthly_limit > 0");
+    while ($key = $active_keys_stmt->fetch()) {
+        $usage_info = getCurrentCycleUsage($key['api_key']);
+        if ($key['monthly_limit'] > 0) {
+            $usage_percentage = round(($usage_info['usage_count'] / $key['monthly_limit']) * 100, 2);
+            if ($usage_percentage >= 80) {
+                $keys_nearing_limit[] = [
+                    'nama' => $key['nama'],
+                    'api_key' => $key['api_key'],
+                    'usage' => $usage_info['usage_count'],
+                    'limit' => $key['monthly_limit'],
+                    'percentage' => $usage_percentage
+                ];
+            }
+        }
+    }
+    $data['api_analytics']['nearing_limit'] = $keys_nearing_limit;
 
-    // 4. Data Grafik (30 hari terakhir) - Mirip dengan getAdvancedDashboardStats
-    $chart_data_stmt = $db->query("
-        SELECT DATE(timestamp) as date, COUNT(id) as hits
-        FROM history
-        WHERE timestamp >= CURDATE() - INTERVAL 30 DAY
-        GROUP BY DATE(timestamp)
-        ORDER BY date ASC
-    ");
+    // --- 6. Feeds ---
+    $data['feeds']['security'] = $db->query("SELECT * FROM api_security_logs ORDER BY last_request DESC LIMIT 5")->fetchAll();
+    $data['feeds']['admin_activity'] = $db->query("SELECT * FROM admin_activity_logs ORDER BY timestamp DESC LIMIT 10")->fetchAll();
+
+    // --- 7. Cache Stats ---
+    $cache_dir = __DIR__ . '/../cache';
+    $file_count = 0;
+    $total_size = 0;
+    if (is_dir($cache_dir)) {
+        $cache_files = scandir($cache_dir);
+        if($cache_files) {
+            foreach ($cache_files as $file) {
+                if ($file !== '.' && $file !== '..' && is_file($cache_dir . '/' . $file)) {
+                    $file_count++;
+                    $total_size += @filesize($cache_dir . '/' . $file);
+                }
+            }
+        }
+    }
+    $data['cache_info'] = ['file_count' => $file_count, 'total_size' => $total_size];
+
+    // --- 8. Chart Data ---
+    $chart_data_stmt = $db->query("SELECT DATE(timestamp) as date, COUNT(id) as hits FROM history WHERE timestamp >= CURDATE() - INTERVAL 30 DAY GROUP BY DATE(timestamp) ORDER BY date ASC");
     $chart_data_raw = $chart_data_stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-
     $labels = [];
     $chart_values = [];
     for ($i = 29; $i >= 0; $i--) {
